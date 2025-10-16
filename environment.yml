@@ -1,3 +1,5 @@
+# contians all dependencies and versions for creating a reproducible Conda environment.
+
 name: movierecs
 channels: [conda-forge]
 dependencies:
