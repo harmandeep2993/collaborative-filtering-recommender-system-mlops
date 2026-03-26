@@ -219,6 +219,7 @@ notebooks/
 
 # add models/
 models/
+!src/models
 
 
 #  Ignore MacOS system files
