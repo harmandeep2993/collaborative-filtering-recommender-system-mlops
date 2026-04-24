@@ -24,7 +24,6 @@ if st.button("Get Recommendations"):
         if response.status_code == 200:
             data = response.json()
             recommendations = data["recommendations"]
-            
             st.subheader(f"Top {n} recommendations for User {user_id}:")
             
             for i, movie in enumerate(recommendations, 1):
