@@ -1,7 +1,6 @@
 # src/models/train.py
 
-""" Training module for the movie recommendation system. 
-This module contains functions to train the recommendation model using the training data."""
+"""Training module for the movie recommendation system."""
 
 import joblib
 import mlflow
@@ -16,61 +15,89 @@ from src.utils import get_logger
 
 logger = get_logger(__name__)
 
-# Define the path to save the trained model
 MODELS_PATH = Path(__file__).parent.parent.parent / "models"
+
 
 def train_model(user_item_matrix: csr_matrix, k: int = 50) -> NearestNeighbors:
     """
-    Train ItemKNN model on user-item matrix.
-    
+    Train ItemKNN model on normalized user-item matrix.
+
     Args:
-        user_item_matrix: sparse user-item matrix
+        user_item_matrix: normalized sparse matrix
         k: number of neighbors
     Returns:
         trained NearestNeighbors model
     """
     logger.info(f"Training ItemKNN with K={k}")
-    
     model = NearestNeighbors(
         n_neighbors=k,
         metric="cosine",
         algorithm="brute"
     )
-    
     model.fit(user_item_matrix.T)
-    
     logger.info(f"Model trained successfully!")
-    
     return model
 
-def save_model(model: NearestNeighbors, model_name: str = "itemknn") -> None:
+
+def train_svd_model(normalized_matrix: csr_matrix, n_factors: int = 50) -> tuple:
+    """
+    Train SVD model on normalized user-item matrix.
+
+    Args:
+        normalized_matrix: normalized sparse matrix
+        n_factors: number of latent factors
+    Returns:
+        tuple: U, sigma, Vt, predicted_ratings
+    """
+    from scipy.sparse.linalg import svds
+
+    logger.info(f"Training SVD with {n_factors} factors")
+
+    U, sigma, Vt = svds(normalized_matrix.astype(float), k=n_factors)
+    sigma = np.diag(sigma)
+
+    predicted_ratings = np.dot(np.dot(U, sigma), Vt)
+
+    if hasattr(predicted_ratings, "toarray"):
+        predicted_ratings = predicted_ratings.toarray()
+
+    predicted_ratings = np.asarray(predicted_ratings)
+
+    logger.info(f"SVD trained successfully!")
+    return U, sigma, Vt, predicted_ratings
+
+
+def save_model(model, model_name: str = "itemknn") -> None:
     """
     Save trained model to models/ folder.
-    
+
     Args:
-        model: trained NearestNeighbors model
+        model: trained model or predicted ratings matrix
         model_name: name of the model file
     """
     MODELS_PATH.mkdir(parents=True, exist_ok=True)
-    
     model_path = MODELS_PATH / f"{model_name}.joblib"
     joblib.dump(model, model_path)
-    
     logger.info(f"Model saved to {model_path} successfully!")
 
-def _evaluate_model(
+
+def _evaluate_itemknn(
     model: NearestNeighbors,
     user_item_matrix: csr_matrix,
+    normalized_matrix: csr_matrix,
+    user_means: np.ndarray,
     test: pd.DataFrame,
     user_map: dict,
     item_map: dict
 ) -> float:
     """
-    Evaluate model using RMSE on test data.
-    
+    Evaluate ItemKNN model using RMSE on test sample.
+
     Args:
-        model: trained model
-        user_item_matrix: sparse matrix
+        model: trained ItemKNN model
+        user_item_matrix: original sparse matrix
+        normalized_matrix: normalized sparse matrix
+        user_means: array of user means
         test: test dataframe
         user_map: user_id to index mapping
         item_map: movie_id to index mapping
@@ -82,7 +109,9 @@ def _evaluate_model(
     actuals = []
     predictions = []
 
-    for _, row in test.head(1000).iterrows():
+    test_sample = test.sample(1000, random_state=42)
+
+    for _, row in test_sample.iterrows():
         user_idx = user_map.get(row["user_id"])
         item_idx = item_map.get(row["movie_id"])
 
@@ -90,7 +119,7 @@ def _evaluate_model(
             continue
 
         distances, indices = model.kneighbors(
-            user_item_matrix.T[item_idx],
+            normalized_matrix.T[item_idx],
             n_neighbors=model.n_neighbors
         )
 
@@ -100,68 +129,134 @@ def _evaluate_model(
         if weights.sum() > 0 and similar_ratings.sum() > 0:
             pred = np.average(similar_ratings, weights=weights)
         else:
-            pred = 0
+            pred = user_means[user_idx]
 
         actuals.append(row["rating"])
         predictions.append(pred)
 
     rmse = root_mean_squared_error(actuals, predictions)
-    logger.info(f"RMSE: {rmse:.4f}")
+    logger.info(f"ItemKNN RMSE: {rmse:.4f}")
     return rmse
 
-def train_pipeline(
-    user_item_matrix: csr_matrix,
-    test,
+
+def _evaluate_svd(
+    predicted_ratings: np.ndarray,
+    user_means: np.ndarray,
+    test: pd.DataFrame,
     user_map: dict,
-    item_map: dict,
-    k_values: list = [10, 20, 50]
-) -> NearestNeighbors:
+    item_map: dict
+) -> float:
     """
-    Train multiple ItemKNN models with different K values,
-    track with MLflow and save the best model.
-    
+    Evaluate SVD model using RMSE on test sample.
+
     Args:
-        user_item_matrix: sparse user-item matrix
+        predicted_ratings: full predicted ratings matrix
+        user_means: array of user means
         test: test dataframe
         user_map: user_id to index mapping
         item_map: movie_id to index mapping
-        k_values: list of K values to try
     Returns:
-        best trained model
+        RMSE score
+    """
+    from sklearn.metrics import root_mean_squared_error
+
+    actuals = []
+    predictions = []
+
+    test_sample = test.sample(1000, random_state=42)
+
+    for _, row in test_sample.iterrows():
+        user_idx = user_map.get(row["user_id"])
+        item_idx = item_map.get(row["movie_id"])
+
+        if user_idx is None or item_idx is None:
+            continue
+
+        pred = predicted_ratings[user_idx, item_idx] + user_means[user_idx]
+
+        actuals.append(row["rating"])
+        predictions.append(pred)
+
+    rmse = root_mean_squared_error(actuals, predictions)
+    logger.info(f"SVD RMSE: {rmse:.4f}")
+    return rmse
+
+
+def train_pipeline(
+    user_item_matrix: csr_matrix,
+    normalized_matrix: csr_matrix,
+    user_means: np.ndarray,
+    test: pd.DataFrame,
+    user_map: dict,
+    item_map: dict,
+    k_values: list = [10, 20, 50],
+    n_factors_list: list = [50, 100, 200]
+) -> tuple:
+    """
+    Train ItemKNN and SVD models, track with MLflow, save best model.
+
+    Args:
+        user_item_matrix: original sparse matrix
+        normalized_matrix: normalized sparse matrix
+        user_means: array of user means
+        test: test dataframe
+        user_map: user_id to index mapping
+        item_map: movie_id to index mapping
+        k_values: list of K values for ItemKNN
+        n_factors_list: list of factor values for SVD
+    Returns:
+        tuple: best_model, best_model_type, best_predicted_ratings
     """
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
     mlflow.set_experiment("movie-recommendation-sys")
 
     best_model = None
-    best_k = None
+    best_model_type = None
     best_rmse = float("inf")
+    best_predicted_ratings = None
 
+    # train ItemKNN models
     for k in k_values:
         with mlflow.start_run(run_name=f"ItemKNN_K{k}"):
-
-            # train model
-            model = train_model(user_item_matrix, k=k)
-
-            # evaluate model
-            rmse = _evaluate_model(model, user_item_matrix, test, user_map, item_map)
-
-            # log to mlflow
+            model = train_model(normalized_matrix, k=k)
+            rmse = _evaluate_itemknn(
+                model, user_item_matrix, normalized_matrix,
+                user_means, test, user_map, item_map
+            )
+            mlflow.log_param("model", "ItemKNN")
             mlflow.log_param("k", k)
             mlflow.log_param("metric", "cosine")
             mlflow.log_param("algorithm", "brute")
             mlflow.log_metric("rmse", rmse)
+            logger.info(f"ItemKNN K={k} -> RMSE: {rmse:.4f}")
 
-            logger.info(f"K={k} → RMSE: {rmse:.4f}")
-
-            # track best model
             if rmse < best_rmse:
                 best_rmse = rmse
                 best_model = model
-                best_k = k
+                best_model_type = f"itemknn_k{k}"
+
+    # train SVD models
+    for n_factors in n_factors_list:
+        with mlflow.start_run(run_name=f"SVD_{n_factors}factors"):
+            U, sigma, Vt, predicted_ratings = train_svd_model(
+                normalized_matrix, n_factors=n_factors
+            )
+            rmse = _evaluate_svd(
+                predicted_ratings, user_means, test, user_map, item_map
+            )
+            mlflow.log_param("model", "SVD")
+            mlflow.log_param("n_factors", n_factors)
+            mlflow.log_metric("rmse", rmse)
+            logger.info(f"SVD {n_factors} factors -> RMSE: {rmse:.4f}")
+
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_model = predicted_ratings
+                best_model_type = f"svd_{n_factors}factors"
+                best_predicted_ratings = predicted_ratings
 
     # save best model
-    save_model(best_model, model_name=f"itemknn_k{best_k}")
+    save_model(best_model, model_name=best_model_type)
+    logger.info(f"Best model: {best_model_type} RMSE={best_rmse:.4f}")
 
-    logger.info(f"Best model: ItemKNN K={best_k} RMSE={best_rmse:.4f} ✅")
-
-    return best_model
+    return best_model, best_model_type, best_predicted_ratings

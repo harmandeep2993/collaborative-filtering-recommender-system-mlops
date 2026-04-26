@@ -1,11 +1,5 @@
 """
 Evaluation module for movie recommendation system.
-
-Responsibilities:
-- Evaluate best model on test set
-- Calculate RMSE
-- Save evaluation report
-- Log metrics to MLflow
 """
 
 import json
@@ -30,32 +24,23 @@ def save_evaluation_report(report: dict, report_name: str = "evaluation_report.j
     report_path = REPORTS_PATH / report_name
     with open(report_path, "w") as f:
         json.dump(report, f, indent=4)
-    logger.info(f"Evaluation report saved to {report_path} ✅")
+    logger.info(f"Evaluation report saved to {report_path}")
 
 
-def calculate_rmse(
+def calculate_rmse_knn(
     model: NearestNeighbors,
     user_item_matrix: csr_matrix,
+    normalized_matrix: csr_matrix,
+    user_means: np.ndarray,
     test: pd.DataFrame,
     user_map: dict,
     item_map: dict
 ) -> float:
-    """
-    Calculate RMSE on test sample.
-
-    Args:
-        model: trained model
-        user_item_matrix: sparse matrix
-        test: test dataframe
-        user_map: user_id to index mapping
-        item_map: movie_id to index mapping
-    Returns:
-        RMSE score
-    """
+    """Calculate RMSE for KNN model on test sample."""
     actuals = []
     predictions = []
 
-    test_sample = test.sample(5000, random_state=42)
+    test_sample = test.sample(1000, random_state=42)
 
     for _, row in test_sample.iterrows():
         user_idx = user_map.get(row["user_id"])
@@ -65,7 +50,7 @@ def calculate_rmse(
             continue
 
         distances, indices = model.kneighbors(
-            user_item_matrix.T[item_idx],
+            normalized_matrix.T[item_idx],
             n_neighbors=model.n_neighbors
         )
 
@@ -75,47 +60,71 @@ def calculate_rmse(
         if weights.sum() > 0 and similar_ratings.sum() > 0:
             pred = np.average(similar_ratings, weights=weights)
         else:
-            pred = 0
+            pred = user_means[user_idx]
 
         actuals.append(row["rating"])
         predictions.append(pred)
 
     rmse = root_mean_squared_error(actuals, predictions)
-    logger.info(f"RMSE on test sample: {rmse:.4f}")
+    logger.info(f"KNN RMSE on test sample: {rmse:.4f}")
+    return rmse
+
+
+def calculate_rmse_svd(
+    predicted_ratings: np.ndarray,
+    user_means: np.ndarray,
+    test: pd.DataFrame,
+    user_map: dict,
+    item_map: dict
+) -> float:
+    """Calculate RMSE for SVD model on full test set."""
+    actuals = []
+    predictions = []
+
+    for _, row in test.iterrows():
+        user_idx = user_map.get(row["user_id"])
+        item_idx = item_map.get(row["movie_id"])
+
+        if user_idx is None or item_idx is None:
+            continue
+
+        pred = predicted_ratings[user_idx, item_idx] + user_means[user_idx]
+        actuals.append(row["rating"])
+        predictions.append(pred)
+
+    rmse = root_mean_squared_error(actuals, predictions)
+    logger.info(f"SVD RMSE on full test set: {rmse:.4f}")
     return rmse
 
 
 def evaluate_pipeline(
-    model: NearestNeighbors,
+    model,
     user_item_matrix: csr_matrix,
+    normalized_matrix: csr_matrix,
+    user_means: np.ndarray,
     test: pd.DataFrame,
     user_map: dict,
     item_map: dict,
+    best_model_type: str = "itemknn",
     k: int = 10
 ) -> dict:
-    """
-    Run evaluation pipeline on best model.
-
-    Args:
-        model: best trained model
-        user_item_matrix: sparse matrix
-        test: test dataframe
-        user_map: user_id to index mapping
-        item_map: movie_id to index mapping
-        k: number of recommendations
-    Returns:
-        dict: evaluation metrics
-    """
+    """Run evaluation pipeline on best model."""
     logger.info("Starting evaluation pipeline...")
-    rmse = calculate_rmse(model, user_item_matrix, test, user_map, item_map)
 
-    report = {"rmse": round(rmse, 4)}
+    if "svd" in best_model_type:
+        rmse = calculate_rmse_svd(model, user_means, test, user_map, item_map)
+    else:
+        rmse = calculate_rmse_knn(
+            model, user_item_matrix, normalized_matrix,
+            user_means, test, user_map, item_map
+        )
 
+    report = {"rmse": round(rmse, 4), "model": best_model_type}
     save_evaluation_report(report)
 
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
     with mlflow.start_run(run_name="best_model_evaluation"):
-        mlflow.log_metrics(report)
+        mlflow.log_metrics({"rmse": round(rmse, 4)})
 
     logger.info(f"Evaluation report: {report}")
 

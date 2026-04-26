@@ -69,6 +69,22 @@ def load_artifacts() -> tuple:
     
     return user_item_matrix, user_map, item_map, idx_to_item
 
+
+def load_svd_artifacts()-> tuple:
+    """
+    Load SVD predicted ratings matrix and user means.
+
+    Returns.
+    tuple: predicted ratings matrix, user means
+    """
+
+    predicted_ratings = joblib.load(MODELS_PATH / "svd_50factors.joblib")
+    user_means = np.load(DATA_PATH / "user_means.npy")
+
+    logger.info("SVD artifacts loaded successfully")
+    return predicted_ratings, user_means
+
+
 # Evaluation module for the movie recommendation system.
 def recommend_movies(
     user_id: int,
@@ -143,6 +159,69 @@ def recommend_movies(
     logger.info(f"Generated {len(result)} recommendations for User {user_id}")
     return result
 
+
+def recommend_movies_svd(
+    user_id: int,
+    predicted_ratings: np.ndarray,
+    user_means: np.ndarray,
+    user_map: dict,
+    idx_to_item: dict,
+    user_item_matrix,
+    movies: pd.DataFrame,
+    n: int = 10
+) -> pd.DataFrame:
+    """
+    Generate recommendations using SVD predicted ratings.
+    
+    Args:
+        user_id: user to recommend for
+        predicted_ratings: full predicted ratings matrix
+        user_means: array of user means
+        user_map: user_id to index mapping
+        idx_to_item: index to movie_id mapping
+        user_item_matrix: to find unwatched movies
+        movies: movies dataframe for titles
+        n: number of recommendations
+    Returns:
+        dataframe with top N recommendations
+    """
+    user_idx = user_map.get(user_id)
+    if user_idx is None:
+        logger.error(f"User {user_id} not found!")
+        return None
+
+    # get user ratings
+    user_ratings = user_item_matrix[user_idx].toarray().flatten()
+
+    # get predicted ratings for this user
+    user_predicted = predicted_ratings[user_idx].copy()
+
+    # add user mean back
+    user_predicted = user_predicted + user_means[user_idx]
+
+    # set watched movies to -1
+    user_predicted[user_ratings > 0] = -1
+
+    # get top N indices
+    top_indices = np.argsort(user_predicted)[::-1][:n]
+
+    recommendations = []
+    for item_idx in top_indices:
+        movie_id = idx_to_item.get(item_idx)
+        score = user_predicted[item_idx]
+        title = movies[movies["movie_id"] == movie_id]["title"].values
+        if len(title) > 0:
+            recommendations.append({
+                "movie_id": movie_id,
+                "title": title[0],
+                "predicted_score": round(float(score), 2)
+            })
+
+    result = pd.DataFrame(recommendations)
+    logger.info(f"Generated {len(result)} SVD recommendations for User {user_id}")
+    return result
+
+
 def predict_pipeline(user_id: int, movies: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     """
     Run full prediction pipeline for a user.
@@ -154,20 +233,35 @@ def predict_pipeline(user_id: int, movies: pd.DataFrame, n: int = 10) -> pd.Data
     Returns:
         dataframe with top N recommendations
     """
-    # load model and artifacts
-    model = load_model()
+    # load artifacts
     user_item_matrix, user_map, item_map, idx_to_item = load_artifacts()
 
-    # generate recommendations
-    recommendations = recommend_movies(
-        user_id=user_id,
-        model=model,
-        user_item_matrix=user_item_matrix,
-        user_map=user_map,
-        item_map=item_map,
-        idx_to_item=idx_to_item,
-        movies=movies,
-        n=n
-    )
+    # try SVD first
+    svd_path = MODELS_PATH / "svd_50factors.joblib"
+    if svd_path.exists():
+        predicted_ratings, user_means = load_svd_artifacts()
+        recommendations = recommend_movies_svd(
+            user_id=user_id,
+            predicted_ratings=predicted_ratings,
+            user_means=user_means,
+            user_map=user_map,
+            idx_to_item=idx_to_item,
+            user_item_matrix=user_item_matrix,
+            movies=movies,
+            n=n
+        )
+    else:
+        # fallback to ItemKNN
+        model = load_model()
+        recommendations = recommend_movies(
+            user_id=user_id,
+            model=model,
+            user_item_matrix=user_item_matrix,
+            user_map=user_map,
+            item_map=item_map,
+            idx_to_item=idx_to_item,
+            movies=movies,
+            n=n
+        )
 
     return recommendations
