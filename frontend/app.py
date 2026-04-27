@@ -1,5 +1,5 @@
 """
-Streamlit frontend for CinePick- Movie Recommendation System.
+Streamlit frontend for CinePick - Movie Recommendation System.
 """
 
 import os
@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_URL = "http://127.0.0.1:8000"
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_URL = "https://image.tmdb.org/t/p/w500"
@@ -23,18 +23,14 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .stApp {
-        background-color: #0f0f0f;
-    }
+    .stApp { background-color: #0f0f0f; }
     [data-testid="stSidebar"] {
         background-color: #141414;
         border-right: 1px solid #2a2a2a;
     }
     [data-testid="stSidebar"] p,
     [data-testid="stSidebar"] label,
-    [data-testid="stSidebar"] span {
-        color: #e0e0e0 !important;
-    }
+    [data-testid="stSidebar"] span { color: #e0e0e0 !important; }
     .main .block-container {
         background-color: #0f0f0f;
         padding-top: 1.5rem;
@@ -63,19 +59,17 @@ st.markdown("""
         width: 100% !important;
         padding: 0.6rem !important;
     }
-    .stButton > button:hover {
-        background-color: #b20710 !important;
-    }
-    .stSlider > div > div > div {
-        background-color: #E50914 !important;
-    }
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    hr {border-color: #2a2a2a !important;}
+    .stButton > button:hover { background-color: #b20710 !important; }
+    .stSlider > div > div > div { background-color: #E50914 !important; }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    header { visibility: hidden; }
+    hr { border-color: #2a2a2a !important; }
 </style>
 """, unsafe_allow_html=True)
 
+
+# ── helpers ──────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300)
 def get_recommendations(user_id: int, n: int) -> list:
@@ -125,11 +119,36 @@ def search_tmdb(title: str) -> dict:
     return {}
 
 
+@st.cache_data(ttl=86400)
+def get_tmdb_genres() -> dict:
+    try:
+        response = requests.get(
+            f"{TMDB_BASE_URL}/genre/movie/list",
+            params={"api_key": TMDB_API_KEY, "language": "en-US"}
+        )
+        if response.status_code == 200:
+            genres = response.json().get("genres", [])
+            return {g["id"]: g["name"] for g in genres}
+    except Exception:
+        pass
+    return {}
+
+
 def get_poster_url(tmdb_data: dict) -> str:
     poster_path = tmdb_data.get("poster_path")
     if poster_path:
         return f"{TMDB_IMAGE_URL}{poster_path}"
     return None
+
+
+def get_genres(tmdb_data: dict, max_genres: int = 3) -> str:
+    genre_ids = tmdb_data.get("genre_ids", [])
+    genres = [tmdb_genres.get(gid, "") for gid in genre_ids[:max_genres]]
+    return " · ".join([g for g in genres if g])
+
+
+# load genres once
+tmdb_genres = get_tmdb_genres()
 
 
 # ── sidebar ──────────────────────────────────────────────────────────────────
@@ -147,7 +166,7 @@ with st.sidebar:
 
     st.markdown("<p style='font-size:0.7rem;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin:0 0 6px;'>User ID</p>", unsafe_allow_html=True)
     user_id = st.number_input(
-        "",
+        "user_id",
         min_value=1,
         max_value=6040,
         value=1,
@@ -158,7 +177,7 @@ with st.sidebar:
 
     st.markdown("<p style='font-size:0.7rem;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin:0 0 6px;'>Recommendations</p>", unsafe_allow_html=True)
     n = st.select_slider(
-        "",
+        "Recommendations",
         options=[5, 10, 20],
         value=10,
         label_visibility="collapsed"
@@ -186,6 +205,7 @@ with st.sidebar:
         </div>
         """, unsafe_allow_html=True)
 
+
 # ── main content ─────────────────────────────────────────────────────────────
 
 if get_recs:
@@ -194,7 +214,7 @@ if get_recs:
     st.markdown(f"""
     <div style='background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;padding:1.25rem 1.75rem;margin-bottom:1.5rem;display:flex;justify-content:space-between;align-items:center;'>
         <div>
-            <p style='font-size:1.3rem;font-weight:700;color:#e0e0e0;margin:0 0 4px;'>Welcome back, User {user_id} 👋</p>
+            <p style='font-size:1.3rem;font-weight:700;color:#e0e0e0;margin:0 0 4px;'>User {user_id} 👋</p>
             <p style='font-size:0.8rem;color:#555;margin:0;'>Powered by SVD collaborative filtering · MovieLens 1M · RMSE 0.965</p>
         </div>
         <div style='text-align:right;'>
@@ -204,16 +224,95 @@ if get_recs:
     </div>
     """, unsafe_allow_html=True)
 
-    # recommendations section
+    with st.spinner("Loading..."):
+        recommendations = get_recommendations(user_id, n)
+        history = get_user_history(user_id)
+
+    # side by side layout
+    left, right = st.columns(2)
+
+    # LEFT — watch history
+    with left:
+        st.markdown("""
+        <div style='display:flex;align-items:center;gap:8px;margin-bottom:1rem;'>
+            <div style='width:3px;height:18px;background:#FFA726;'></div>
+            <p style='font-size:1rem;font-weight:600;color:#e0e0e0;margin:0;'>What you watched</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if history:
+            for movie in history[:5]:
+                tmdb_data = search_tmdb(movie["title"])
+                poster_url = get_poster_url(tmdb_data)
+
+                c1, c2, c3 = st.columns([1, 6, 2])
+                with c1:
+                    if poster_url:
+                        st.image(poster_url, width=50)
+                    else:
+                        st.markdown("<div style='width:50px;height:70px;background:#1a1a1a;border-radius:4px;border:1px solid #2a2a2a;'></div>", unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"<p style='font-size:0.82rem;font-weight:600;color:#e0e0e0;margin:0 0 2px;'>{movie['title']}</p>", unsafe_allow_html=True)
+                    genres = get_genres(tmdb_data)
+                    if genres:
+                        st.markdown(f"<p style='font-size:0.68rem;color:#E50914;margin:0 0 2px;font-weight:500;'>{genres}</p>", unsafe_allow_html=True)
+                    overview = tmdb_data.get("overview", "")[:80] + "..." if tmdb_data.get("overview") else ""
+                    if overview:
+                        st.markdown(f"<p style='font-size:0.68rem;color:#555;margin:0;'>{overview}</p>", unsafe_allow_html=True)
+                with c3:
+                    rating = movie.get("rating", "N/A")
+                    color = "#4CAF50" if float(rating) >= 4 else "#FFA726" if float(rating) >= 3 else "#EF5350"
+                    st.markdown(f"<p style='text-align:right;font-size:0.9rem;font-weight:700;color:{color};margin:0;'>{rating}/5</p>", unsafe_allow_html=True)
+                    st.markdown("<p style='text-align:right;font-size:0.65rem;color:#555;margin:0;'>your rating</p>", unsafe_allow_html=True)
+
+                st.markdown("<hr>", unsafe_allow_html=True)
+        else:
+            st.markdown("<p style='color:#555;font-size:0.85rem;'>No history available.</p>", unsafe_allow_html=True)
+
+    # RIGHT — recommendations
+    with right:
+        st.markdown("""
+        <div style='display:flex;align-items:center;gap:8px;margin-bottom:1rem;'>
+            <div style='width:3px;height:18px;background:#E50914;'></div>
+            <p style='font-size:1rem;font-weight:600;color:#e0e0e0;margin:0;'>Recommended for you</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if recommendations:
+            for movie in recommendations[:5]:
+                tmdb_data = search_tmdb(movie["title"])
+                poster_url = get_poster_url(tmdb_data)
+
+                c1, c2, c3 = st.columns([1, 6, 2])
+                with c1:
+                    if poster_url:
+                        st.image(poster_url, width=50)
+                    else:
+                        st.markdown("<div style='width:50px;height:70px;background:#1a1a1a;border-radius:4px;border:1px solid #2a2a2a;'></div>", unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"<p style='font-size:0.82rem;font-weight:600;color:#e0e0e0;margin:0 0 2px;'>{movie['title']}</p>", unsafe_allow_html=True)
+                    genres = get_genres(tmdb_data)
+                    if genres:
+                        st.markdown(f"<p style='font-size:0.68rem;color:#E50914;margin:0 0 2px;font-weight:500;'>{genres}</p>", unsafe_allow_html=True)
+                    overview = tmdb_data.get("overview", "")[:80] + "..." if tmdb_data.get("overview") else ""
+                    if overview:
+                        st.markdown(f"<p style='font-size:0.68rem;color:#555;margin:0;'>{overview}</p>", unsafe_allow_html=True)
+                with c3:
+                    score = movie.get("predicted_score", "N/A")
+                    st.markdown(f"<p style='text-align:right;font-size:0.9rem;font-weight:700;color:#4CAF50;margin:0;'>{score}/5</p>", unsafe_allow_html=True)
+                    st.markdown("<p style='text-align:right;font-size:0.65rem;color:#555;margin:0;'>predicted</p>", unsafe_allow_html=True)
+
+                st.markdown("<hr>", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # full recommendations grid
     st.markdown("""
     <div style='display:flex;align-items:center;gap:8px;margin-bottom:1rem;'>
         <div style='width:3px;height:18px;background:#E50914;'></div>
-        <p style='font-size:1rem;font-weight:600;color:#e0e0e0;margin:0;'>Top picks for you</p>
+        <p style='font-size:1rem;font-weight:600;color:#e0e0e0;margin:0;'>All recommendations</p>
     </div>
     """, unsafe_allow_html=True)
-
-    with st.spinner("Finding movies you will love..."):
-        recommendations = get_recommendations(user_id, n)
 
     if recommendations:
         cols = st.columns(5)
@@ -231,66 +330,15 @@ if get_recs:
                     )
 
                 st.markdown(f"<p style='font-size:0.72rem;font-weight:600;color:#e0e0e0;margin:4px 0 2px;line-height:1.3;'>{movie['title']}</p>", unsafe_allow_html=True)
+                genres = get_genres(tmdb_data)
+                if genres:
+                    st.markdown(f"<p style='font-size:0.65rem;color:#E50914;margin:0 0 1px;'>{genres}</p>", unsafe_allow_html=True)
                 st.markdown(f"<p style='font-size:0.72rem;color:#4CAF50;font-weight:600;margin:0 0 1px;'>{movie['predicted_score']} / 5</p>", unsafe_allow_html=True)
-
                 tmdb_rating = tmdb_data.get("vote_average")
                 if tmdb_rating:
                     st.markdown(f"<p style='font-size:0.68rem;color:#555;margin:0;'>TMDB {tmdb_rating:.1f}</p>", unsafe_allow_html=True)
 
-    st.markdown("---")
-
-    # watch history section
-    st.markdown("""
-    <div style='display:flex;align-items:center;gap:8px;margin-bottom:1rem;'>
-        <div style='width:3px;height:18px;background:#FFA726;'></div>
-        <p style='font-size:1rem;font-weight:600;color:#e0e0e0;margin:0;'>Your watch history</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    history = get_user_history(user_id)
-
-    if history:
-        for movie in history[:5]:
-            tmdb_data = search_tmdb(movie["title"])
-            poster_url = get_poster_url(tmdb_data)
-            overview = tmdb_data.get("overview", "")
-            if overview and len(overview) > 120:
-                overview = overview[:120] + "..."
-
-            col1, col2, col3 = st.columns([1, 7, 2])
-
-            with col1:
-                if poster_url:
-                    st.image(poster_url, width=55)
-                else:
-                    st.markdown(
-                        "<div style='width:55px;height:78px;background:#1a1a1a;border-radius:4px;border:1px solid #2a2a2a;'></div>",
-                        unsafe_allow_html=True
-                    )
-
-            with col2:
-                st.markdown(f"<p style='font-size:0.85rem;font-weight:600;color:#e0e0e0;margin:0 0 3px;'>{movie['title']}</p>", unsafe_allow_html=True)
-                if overview:
-                    st.markdown(f"<p style='font-size:0.72rem;color:#555;margin:0;'>{overview}</p>", unsafe_allow_html=True)
-
-            with col3:
-                rating = movie.get("rating", "N/A")
-                color = "#4CAF50" if float(rating) >= 4 else "#FFA726" if float(rating) >= 3 else "#EF5350"
-                st.markdown(
-                    f"<p style='text-align:right;font-size:0.9rem;font-weight:700;color:{color};margin:0;'>{rating} / 5</p>",
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    "<p style='text-align:right;font-size:0.68rem;color:#555;margin:0;'>your rating</p>",
-                    unsafe_allow_html=True
-                )
-
-            st.markdown("<hr>", unsafe_allow_html=True)
-    else:
-        st.markdown("<p style='color:#555;font-size:0.85rem;'>No watch history available.</p>", unsafe_allow_html=True)
-
 else:
-    # welcome screen
     st.markdown("""
     <div style='text-align:center;padding:6rem 2rem;'>
         <p style='font-size:4rem;margin:0 0 1rem;'>🍿</p>
